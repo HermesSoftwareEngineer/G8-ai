@@ -32,10 +32,22 @@ def login():
     return jsonify({"token": token, "user": user})
 
 
+@bp.route("/api/auth/refresh", methods=["POST"])
+@require_auth
+def refresh():
+    """Re-issue a fresh token for the currently authenticated user."""
+    user = g.current_user
+    db = get_db()
+    role_res = db.table("roles").select("name").eq("id", user["role_id"]).execute()
+    role_name = role_res.data[0]["name"] if role_res.data else ""
+    token = create_token(user["id"], role_name)
+    user.pop("password_hash", None)
+    return jsonify({"token": token, "user": user})
+
+
 @bp.route("/api/auth/logout", methods=["POST"])
 @require_auth
 def logout():
-    # JWT is stateless; client must discard the token
     return jsonify({"message": "Logout realizado com sucesso"})
 
 

@@ -29,6 +29,7 @@ def create_app() -> Flask:
     from app.routes.users import bp as users_bp
     from app.routes.schedules import bp as schedules_bp
     from app.routes.config import bp as config_bp
+    from app.routes.dashboard import bp_dashboard
 
     app.register_blueprint(webhook_bp)
     app.register_blueprint(appointments_bp)
@@ -38,6 +39,7 @@ def create_app() -> Flask:
     app.register_blueprint(users_bp)
     app.register_blueprint(schedules_bp)
     app.register_blueprint(config_bp)
+    app.register_blueprint(bp_dashboard)
 
     # Health check
     @app.route("/health")
