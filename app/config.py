@@ -8,7 +8,8 @@ class Config:
     SUPABASE_URL = os.getenv("SUPABASE_URL")
     SUPABASE_SERVICE_KEY = os.getenv("SUPABASE_SERVICE_KEY")
 
-    ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY")
+    DEEPSEEK_API_KEY = os.getenv("DEEPSEEK_API_KEY")
+    DEEPSEEK_BASE_URL = os.getenv("DEEPSEEK_BASE_URL", "https://api.deepseek.com")
 
     EVOLUTION_API_URL = os.getenv("EVOLUTION_API_URL", "http://localhost:8080")
     EVOLUTION_API_KEY = os.getenv("EVOLUTION_API_KEY")
