@@ -457,11 +457,69 @@ Salva o `prompt.md`. A IA usa o novo prompt na próxima mensagem recebida, sem r
 > | Variável | O que injeta |
 > |---|---|
 > | `{bot_name}` | Nome do bot (configurado em `/api/config/ai`) |
-> | `{customer_info}` | Nome e telefone do cliente (ou "cliente novo") |
 >
-> Se alguma variável estiver faltando, o endpoint retorna **400** com a lista das ausentes.
->
-> > **Nota:** `shop_info`, serviços, barbeiros e estado da conversa **não são injetados no prompt**. O agente LangGraph gerencia o estado internamente e consulta dados sob demanda via tools.
+> Se a variável estiver faltando, o endpoint retorna **400**.
+
+---
+
+## Notification Templates
+
+Templates editáveis de notificações WhatsApp (confirmação, lembrete, cancelamento).
+
+### GET `/api/notification-templates`
+Retorna todos os templates com `subject` (rótulo para o frontend) e `body` (texto com placeholders).
+
+**Response 200**
+```json
+{
+  "confirmation_client": {
+    "subject": "Confirmação para o cliente",
+    "body": "✅ Agendamento confirmado!\n\n📅 Data: {data}\n..."
+  },
+  "confirmation_barber": {
+    "subject": "Alerta para o barbeiro",
+    "body": "🔔 Novo agendamento!\n\n👤 Cliente: {cliente}\n..."
+  },
+  "reminder_1h_client": {
+    "subject": "Lembrete para o cliente",
+    "body": "⏰ Lembrete: seu horário..."
+  },
+  "reminder_1h_barber": {
+    "subject": "Lembrete para o barbeiro",
+    "body": "⏰ Lembrete: você tem um cliente..."
+  },
+  "cancellation_barber": {
+    "subject": "Cancelamento para o barbeiro",
+    "body": "❌ Agendamento cancelado!\n..."
+  }
+}
+```
+
+### PUT `/api/notification-templates`
+Atualiza um ou mais templates. Envie apenas as chaves que deseja alterar.
+
+**Body**
+```json
+{
+  "confirmation_client": {
+    "subject": "Confirmação para o cliente",
+    "body": "✅ Agendado! \n\n{data} às {hora}\n{servico} com {barbeiro}\n\nValeu! 🤙"
+  }
+}
+```
+
+**Response 200** — mesmo formato do GET, com todos os templates atualizados.
+
+**Placeholders disponíveis**
+
+| Placeholder | Templates onde aparece |
+|---|---|
+| `{data}` | confirmation_client, confirmation_barber, cancellation_barber |
+| `{hora}` | confirmation_client, confirmation_barber, reminder_1h_client, reminder_1h_barber, cancellation_barber |
+| `{servico}` | confirmation_client, confirmation_barber, reminder_1h_client, reminder_1h_barber |
+| `{barbeiro}` | confirmation_client, reminder_1h_client |
+| `{cliente}` | confirmation_barber, reminder_1h_barber, cancellation_barber |
+| `{cliente_phone}` | confirmation_barber |
 
 ---
 

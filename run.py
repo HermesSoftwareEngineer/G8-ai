@@ -9,6 +9,9 @@ from app.config import Config
 app = create_app()
 
 if __name__ == "__main__":
+    from app.services.ngrok_service import start_dev_tunnel
+    start_dev_tunnel()
+
     port = Config.PORT
     debug = Config.FLASK_ENV == "development"
     print(f"🚀 G8-AI iniciando em http://localhost:{port} [{'DEBUG' if debug else 'PROD'}]")

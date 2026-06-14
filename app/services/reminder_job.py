@@ -1,6 +1,7 @@
 import logging
 from datetime import timezone, timedelta
 from apscheduler.schedulers.background import BackgroundScheduler
+from app.config import Config
 from app.utils.datetime_utils import now_fortaleza
 
 logger = logging.getLogger(__name__)
@@ -52,10 +53,11 @@ def start_scheduler() -> None:
     global _scheduler
     if _scheduler and _scheduler.running:
         return
+    interval = Config.REMINDER_INTERVAL_SECONDS
     _scheduler = BackgroundScheduler(timezone="America/Fortaleza")
-    _scheduler.add_job(check_reminders, "interval", minutes=15, id="reminder_job")
+    _scheduler.add_job(check_reminders, "interval", seconds=interval, id="reminder_job")
     _scheduler.start()
-    logger.info("APScheduler iniciado — verificando lembretes a cada 15 minutos")
+    logger.info("APScheduler iniciado — verificando lembretes a cada %s segundos", interval)
 
 
 def stop_scheduler() -> None:

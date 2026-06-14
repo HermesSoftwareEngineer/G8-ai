@@ -1,7 +1,7 @@
 from flask import Blueprint, jsonify, request
 from app.utils.auth import require_auth, require_permission
 from app.models.database import get_db
-from app.services.ai_agent import reset_session
+from app.services.ai_agent import reset_session, clear_thread
 from app.services.whatsapp import send_text
 
 bp = Blueprint("sessions", __name__, url_prefix="/api/sessions")
@@ -12,12 +12,17 @@ bp = Blueprint("sessions", __name__, url_prefix="/api/sessions")
 def list_sessions():
     """List all conversation sessions with mode, handoff info and last activity."""
     db = get_db()
-    result = (
+    query = (
         db.table("conversation_sessions")
         .select("phone_whatsapp, mode, handoff_reason, handoff_at, last_activity, customers(name)")
         .order("last_activity", desc=True)
-        .execute()
     )
+
+    search = (request.args.get("search") or "").strip()
+    if search:
+        query = query.ilike("phone_whatsapp", f"%{search}%")
+
+    result = query.execute()
     rows = []
     for s in (result.data or []):
         customer = s.pop("customers", None)
@@ -45,6 +50,7 @@ def update_mode(phone: str):
     update = {"mode": mode, "last_activity": "now()"}
     if mode == "ai":
         update.update({"handoff_reason": None, "handoff_at": None})
+        clear_thread(phone)
 
     db.table("conversation_sessions").update(update).eq("phone_whatsapp", phone).execute()
     return jsonify({"status": "ok", "phone": phone, "mode": mode})

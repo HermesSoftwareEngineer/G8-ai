@@ -36,6 +36,7 @@ def start_dev_tunnel() -> str | None:
         logger.info("🚇 [ngrok] Iniciando tunnel na porta %s...", Config.PORT)
 
         if Config.NGROK_AUTHTOKEN:
+            conf.get_default().ngrok_path = Config.NGROK_PATH
             conf.get_default().auth_token = Config.NGROK_AUTHTOKEN
             masked = Config.NGROK_AUTHTOKEN[:8] + "****"
             logger.info("🚇 [ngrok] Authtoken: %s", masked)

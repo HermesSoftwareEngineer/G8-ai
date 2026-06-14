@@ -18,7 +18,13 @@ def create_app() -> Flask:
     )
 
     # CORS
-    CORS(app, origins=Config.CORS_ORIGINS, supports_credentials=True)
+    CORS(
+        app,
+        origins=Config.CORS_ORIGINS,
+        supports_credentials=True,
+        allow_headers=["Content-Type", "Authorization", "ngrok-skip-browser-warning"],
+        methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
+    )
 
     # Register blueprints
     from app.routes.webhook import bp as webhook_bp
@@ -31,6 +37,7 @@ def create_app() -> Flask:
     from app.routes.config import bp as config_bp
     from app.routes.dashboard import bp_dashboard
     from app.routes.sessions import bp as sessions_bp
+    from app.routes.notification_templates import bp as nt_bp
 
     app.register_blueprint(webhook_bp)
     app.register_blueprint(appointments_bp)
@@ -42,6 +49,7 @@ def create_app() -> Flask:
     app.register_blueprint(config_bp)
     app.register_blueprint(bp_dashboard)
     app.register_blueprint(sessions_bp)
+    app.register_blueprint(nt_bp)
 
     # Health check
     @app.route("/health")

@@ -93,7 +93,7 @@ def update_ai_prompt():
         return jsonify({"error": "Campo 'content' é obrigatório"}), 400
 
     # Garante que as variáveis obrigatórias ainda estão no template
-    required = ["{bot_name}", "{customer_info}"]
+    required = ["{bot_name}"]
     missing = [v for v in required if v not in content]
     if missing:
         return jsonify({

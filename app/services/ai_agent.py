@@ -29,6 +29,8 @@ _checkpointer_ready = False
 
 RESET_COMMANDS = {"/reset", "/reiniciar", "reiniciar"}
 
+SUMMARIZE_THRESHOLD = 30
+
 
 def _db_url() -> str:
     """Append connect_timeout so a bad/unreachable DB fails fast instead of hanging."""
@@ -73,15 +75,10 @@ def init_checkpointer() -> None:
 # System prompt
 # ---------------------------------------------------------------------------
 
-def _build_system_prompt(phone: str, customer: dict | None) -> str:
+def _build_system_prompt() -> str:
     ai_cfg = _load_ai_config()
     bot_name = ai_cfg.get("bot_name", "G8 AI")
-    customer_info = (
-        f"Nome: {customer['name']}, Telefone: {phone}"
-        if customer
-        else f"Número: {phone} (cliente novo)"
-    )
-    return read_prompt().format(bot_name=bot_name, customer_info=customer_info)
+    return read_prompt().format(bot_name=bot_name)
 
 
 # ---------------------------------------------------------------------------
@@ -150,6 +147,93 @@ def get_session_mode(phone: str) -> str:
 
 
 # ---------------------------------------------------------------------------
+# Summarization
+# ---------------------------------------------------------------------------
+
+def _get_thread_messages(phone: str) -> str:
+    """Retrieve conversation history from LangGraph thread as formatted text."""
+    if not Config.SUPABASE_DB_URL:
+        return ""
+    try:
+        with PostgresSaver.from_conn_string(_db_url()) as checkpointer:
+            config = {"configurable": {"thread_id": phone}}
+            ckpt_tuple = checkpointer.get_tuple(config)
+            if not ckpt_tuple or not ckpt_tuple.checkpoint:
+                return ""
+            channel_values = ckpt_tuple.checkpoint.get("channel_values", {})
+            messages = channel_values.get("messages", [])
+            if not messages:
+                return ""
+
+            lines = []
+            for msg in messages:
+                try:
+                    role = "Cliente" if isinstance(msg, HumanMessage) else "Atendente"
+                    content = str(msg.content).strip()
+                except Exception:
+                    content = str(msg).strip()
+                    role = "Msg"
+                if content:
+                    lines.append(f"{role}: {content}")
+            return "\n".join(lines)
+    except Exception as e:
+        logger.error("Erro ao ler thread LangGraph: %s", e)
+        return ""
+
+
+def _generate_summary(messages_text: str) -> str:
+    """Use LLM to summarize a conversation, extracting key facts."""
+    llm = _get_llm()
+    prompt = (
+        "Resuma a seguinte conversa de atendimento da Barbershop G8. "
+        "Seja conciso e extraia apenas informacoes factuais.\n\n"
+        "Inclua no resumo:\n"
+        "- Nome do cliente (se informado)\n"
+        "- Servicos de interesse ou contratados\n"
+        "- Agendamentos realizados (datas, horarios, barbeiros, servicos)\n"
+        "- Preferencias e observacoes relevantes\n"
+        "- Estado atual: o que ficou pendente ou qual foi o ultimo assunto\n\n"
+        "Conversa:\n"
+        f"{messages_text}\n\n"
+        "Resumo:"
+    )
+    try:
+        response = llm.invoke([HumanMessage(content=prompt)])
+        return str(response.content).strip()
+    except Exception as e:
+        logger.error("Erro ao gerar resumo: %s", e)
+        return ""
+
+
+def _check_and_summarize(phone: str) -> None:
+    """Increment message count and trigger summarization when threshold reached."""
+    db = get_db()
+    result = db.table("conversation_sessions").select("id, message_count").eq("phone_whatsapp", phone).execute()
+    if not result.data:
+        return
+
+    session = result.data[0]
+    count = (session.get("message_count") or 0) + 1
+
+    if count >= SUMMARIZE_THRESHOLD:
+        messages_text = _get_thread_messages(phone)
+        if messages_text:
+            summary = _generate_summary(messages_text)
+            db.table("conversation_sessions").update({
+                "summary": summary,
+                "message_count": 0,
+                "last_activity": "now()",
+            }).eq("phone_whatsapp", phone).execute()
+            clear_thread(phone)
+            logger.info("Conversa resumida e thread limpa para %s", phone)
+    else:
+        db.table("conversation_sessions").update({
+            "message_count": count,
+            "last_activity": "now()",
+        }).eq("phone_whatsapp", phone).execute()
+
+
+# ---------------------------------------------------------------------------
 # Handoff
 # ---------------------------------------------------------------------------
 
@@ -194,6 +278,22 @@ def _do_handoff(phone: str, reason: str) -> None:
 # Reset
 # ---------------------------------------------------------------------------
 
+def clear_thread(phone: str) -> None:
+    """Delete LangGraph checkpoints for a phone number (new thread on next message)."""
+    if not Config.SUPABASE_DB_URL:
+        return
+    try:
+        with PostgresSaver.from_conn_string(_db_url()) as checkpointer:
+            checkpointer.delete_thread(phone)
+    except Exception as e:
+        logger.error("Erro ao limpar thread LangGraph: %s", e)
+
+    db = get_db()
+    db.table("conversation_sessions").update({
+        "message_count": 0,
+    }).eq("phone_whatsapp", phone).execute()
+
+
 def reset_session(phone: str) -> None:
     """Clear LangGraph thread and reset session mode to 'ai'."""
     if Config.SUPABASE_DB_URL:
@@ -214,6 +314,8 @@ def reset_session(phone: str) -> None:
             "context": [],
             "state": "idle",
             "last_activity": "now()",
+            "message_count": 0,
+            "summary": None,
         }).eq("phone_whatsapp", phone).execute()
 
 
@@ -313,10 +415,47 @@ def _build_tools(phone: str) -> list:
         _do_handoff(phone, reason)
         return "Transferência realizada. O operador foi notificado e assumirá o atendimento em breve."
 
+    @tool
+    def get_conversation_summary() -> str:
+        """Retorna o resumo de conversas anteriores com este cliente, se disponivel.
+        Use quando precisar relembrar o historico, preferencias ou agendamentos passados."""
+        db = get_db()
+        result = db.table("conversation_sessions").select("summary").eq("phone_whatsapp", phone).execute()
+        if result.data and result.data[0].get("summary"):
+            return result.data[0]["summary"]
+        return "Nenhum historico anterior encontrado para este cliente."
+
+    @tool
+    def contact_supervisor(message: str) -> str:
+        """Envia uma mensagem para o supervisor/operador humano.
+        Use para: tirar duvidas sobre procedimentos, informar situacoes importantes,
+        relatar problemas tecnicos, ou qualquer caso que precise de orientacao humana
+        sem transferir o atendimento.
+
+        Args:
+            message: Mensagem que sera enviada ao supervisor
+        """
+        ai_cfg = _load_ai_config()
+        operator_phone = ai_cfg.get("operator_whatsapp")
+        if not operator_phone:
+            return "Numero do supervisor nao configurado. Avise o cliente que houve um problema."
+        customer = _get_customer(phone)
+        customer_name = customer["name"] if customer else phone
+        full_msg = (
+            f"\U0001f4e9 *Mensagem do Agente IA*\n"
+            f"Cliente: {customer_name}\n"
+            f"Numero: {phone}\n\n"
+            f"{message}"
+        )
+        from app.services.whatsapp import send_text
+        send_text(operator_phone, full_msg)
+        return "Mensagem enviada ao supervisor com sucesso."
+
     return [
         get_shop_info, get_services, get_barbers, check_availability,
         create_appointment, cancel_appointment, register_customer,
-        get_customer_appointments, transfer_to_human,
+        get_customer_appointments, transfer_to_human, get_conversation_summary,
+        contact_supervisor,
     ]
 
 
@@ -325,8 +464,7 @@ def _build_tools(phone: str) -> list:
 # ---------------------------------------------------------------------------
 
 def process_message(phone: str, text: str) -> str:
-    customer = _get_customer(phone)
-    system_prompt = _build_system_prompt(phone, customer)
+    system_prompt = _build_system_prompt()
     tools = _build_tools(phone)
 
     if not Config.SUPABASE_DB_URL:
@@ -349,6 +487,8 @@ def process_message(phone: str, text: str) -> str:
     except Exception as e:
         logger.error("Erro no LangGraph: %s", e, exc_info=True)
         return "Eita, deu um erro aqui. Pode repetir? 🙏"
+
+    _check_and_summarize(phone)
 
     messages = result.get("messages", [])
     for msg in reversed(messages):

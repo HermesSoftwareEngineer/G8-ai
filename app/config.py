@@ -21,9 +21,11 @@ class Config:
     PORT = int(os.getenv("PORT", 5001))
 
     TZ = os.getenv("TZ", "America/Fortaleza")
+    REMINDER_INTERVAL_SECONDS = int(os.getenv("REMINDER_INTERVAL_SECONDS", "900"))
 
     NGROK_AUTHTOKEN = os.getenv("NGROK_AUTHTOKEN", "")
     NGROK_DOMAIN = os.getenv("NGROK_DOMAIN", "")
+    NGROK_PATH = os.getenv("NGROK_PATH", "C:\\ngrok\\ngrok.exe")
     NGROK_USE_FIXED_URL = os.getenv("NGROK_USE_FIXED_URL", "false").lower() == "true"
 
     JWT_ALGORITHM = "HS256"

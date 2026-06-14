@@ -22,6 +22,23 @@ def _fetch_appointment_details(appointment_id: str) -> dict | None:
     return result.data[0] if result.data else None
 
 
+def _get_template(template_key: str) -> str | None:
+    db = get_db()
+    result = (
+        db.table("notification_templates")
+        .select("body")
+        .eq("template_key", template_key)
+        .execute()
+        .data or []
+    )
+    return result[0]["body"] if result else None
+
+
+def _format_msg(template_key: str, fallback: str, **kwargs) -> str:
+    template = _get_template(template_key)
+    return (template or fallback).format(**kwargs)
+
+
 def send_confirmation(appointment_id: str) -> None:
     appt = _fetch_appointment_details(appointment_id)
     if not appt:
@@ -37,25 +54,20 @@ def send_confirmation(appointment_id: str) -> None:
     cliente_phone = appt["customers"]["phone_whatsapp"]
     barbeiro_phone = appt["barbers"]["phone_whatsapp"]
 
-    # Mensagem para o cliente
-    msg_cliente = (
-        f"✅ Agendamento confirmado!\n\n"
-        f"📅 Data: {data_br}\n"
-        f"⏰ Horário: {hora_br}\n"
-        f"💈 Serviço: {servico}\n"
-        f"👤 Barbeiro: {barbeiro}\n\n"
-        f"Até lá! 🤙"
-    )
+    msg_cliente = _format_msg("confirmation_client",
+        "✅ Agendamento confirmado!\n\n"
+        "📅 Data: {data}\n⏰ Horário: {hora}\n"
+        "💈 Serviço: {servico}\n👤 Barbeiro: {barbeiro}\n\n"
+        "Até lá! 🤙",
+        data=data_br, hora=hora_br, servico=servico, barbeiro=barbeiro)
 
-    # Mensagem para o barbeiro
-    msg_barbeiro = (
-        f"🔔 Novo agendamento!\n\n"
-        f"👤 Cliente: {cliente_nome}\n"
-        f"📱 WhatsApp: {cliente_phone}\n"
-        f"📅 Data: {data_br}\n"
-        f"⏰ Horário: {hora_br}\n"
-        f"💈 Serviço: {servico}"
-    )
+    msg_barbeiro = _format_msg("confirmation_barber",
+        "🔔 Novo agendamento!\n\n"
+        "👤 Cliente: {cliente}\n📱 WhatsApp: {cliente_phone}\n"
+        "📅 Data: {data}\n⏰ Horário: {hora}\n"
+        "💈 Serviço: {servico}",
+        cliente=cliente_nome, cliente_phone=cliente_phone,
+        data=data_br, hora=hora_br, servico=servico)
 
     _send_and_record(appointment_id, "confirmation", cliente_phone, msg_cliente)
     _send_and_record(appointment_id, "barber_alert", barbeiro_phone, msg_barbeiro)
@@ -74,19 +86,16 @@ def send_reminder(appointment_id: str) -> None:
     cliente_phone = appt["customers"]["phone_whatsapp"]
     barbeiro_phone = appt["barbers"]["phone_whatsapp"]
 
-    msg_cliente = (
-        f"⏰ Lembrete: seu horário na Barbershop G8 é em 1 hora!\n\n"
-        f"🕐 {hora_br} com {barbeiro}\n"
-        f"💈 {servico}\n\n"
-        f"Qualquer dúvida, é só chamar aqui. 👊"
-    )
+    msg_cliente = _format_msg("reminder_1h_client",
+        "⏰ Lembrete: seu horário na Barbershop G8 é em 1 hora!\n\n"
+        "🕐 {hora} com {barbeiro}\n💈 {servico}\n\n"
+        "Qualquer dúvida, é só chamar aqui. 👊",
+        hora=hora_br, barbeiro=barbeiro, servico=servico)
 
-    msg_barbeiro = (
-        f"⏰ Lembrete: você tem um cliente em 1 hora!\n\n"
-        f"👤 {cliente_nome}\n"
-        f"🕐 {hora_br}\n"
-        f"💈 {servico}"
-    )
+    msg_barbeiro = _format_msg("reminder_1h_barber",
+        "⏰ Lembrete: você tem um cliente em 1 hora!\n\n"
+        "👤 {cliente}\n🕐 {hora}\n💈 {servico}",
+        cliente=cliente_nome, hora=hora_br, servico=servico)
 
     _send_and_record(appointment_id, "reminder_1h", cliente_phone, msg_cliente)
     _send_and_record(appointment_id, "barber_reminder_1h", barbeiro_phone, msg_barbeiro)
@@ -103,18 +112,16 @@ def send_cancellation(appointment_id: str) -> None:
     barbeiro_phone = appt["barbers"]["phone_whatsapp"]
     cliente_nome = appt["customers"]["name"]
 
-    msg_barbeiro = (
-        f"❌ Agendamento cancelado!\n\n"
-        f"👤 Cliente: {cliente_nome}\n"
-        f"📅 Data: {data_br}\n"
-        f"⏰ Horário: {hora_br}"
-    )
+    msg_barbeiro = _format_msg("cancellation_barber",
+        "❌ Agendamento cancelado!\n\n"
+        "👤 Cliente: {cliente}\n📅 Data: {data}\n⏰ Horário: {hora}",
+        cliente=cliente_nome, data=data_br, hora=hora_br)
+
     send_text(barbeiro_phone, msg_barbeiro)
 
 
 def _send_and_record(appointment_id: str, notif_type: str, phone: str, text: str) -> None:
     db = get_db()
-    # Check if already sent
     existing = (
         db.table("appointment_notifications")
         .select("id, status")

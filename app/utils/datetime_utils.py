@@ -22,7 +22,7 @@ def fortaleza_to_utc(dt: datetime) -> datetime:
 
 def format_datetime_br(dt: datetime) -> str:
     local = utc_to_fortaleza(dt) if dt.tzinfo else FORTALEZA_TZ.localize(dt)
-    return local.strftime("%d/%m/%Y às %H:%M")
+    return local.strftime("%d/%m/%Y às %Hh%M")
 
 
 def format_date_br(dt: datetime) -> str:
@@ -32,7 +32,7 @@ def format_date_br(dt: datetime) -> str:
 
 def format_time_br(dt: datetime) -> str:
     local = utc_to_fortaleza(dt) if dt.tzinfo else FORTALEZA_TZ.localize(dt)
-    return local.strftime("%H:%M")
+    return local.strftime("%Hh%M")
 
 
 def parse_iso(iso_str: str) -> datetime:
