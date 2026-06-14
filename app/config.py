@@ -14,6 +14,7 @@ class Config:
     EVOLUTION_API_URL = os.getenv("EVOLUTION_API_URL", "http://localhost:8080")
     EVOLUTION_API_KEY = os.getenv("EVOLUTION_API_KEY")
     EVOLUTION_INSTANCE_NAME = os.getenv("EVOLUTION_INSTANCE_NAME", "g8-ai")
+    WEBHOOK_URL = os.getenv("WEBHOOK_URL", "")
 
     SECRET_KEY = os.getenv("FLASK_SECRET_KEY", "dev-secret-change-in-prod")
     FLASK_ENV = os.getenv("FLASK_ENV", "development")

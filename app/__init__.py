@@ -47,6 +47,8 @@ def create_app() -> Flask:
     # Start background scheduler (not in testing)
     if not app.testing:
         from app.services.reminder_job import start_scheduler
+        from app.services.whatsapp import setup_webhook
         start_scheduler()
+        setup_webhook()
 
     return app
