@@ -12,40 +12,46 @@ def _headers() -> dict:
     }
 
 
-def _base_url() -> str:
-    return f"{Config.EVOLUTION_API_URL}/message/sendText/{Config.EVOLUTION_INSTANCE_NAME}"
+def _send_url(instance: str) -> str:
+    return f"{Config.EVOLUTION_API_URL}/message/sendText/{instance}"
 
 
-def send_text(to: str, text: str) -> bool:
-    """Send a WhatsApp text message via Evolution API."""
-    # Normalize phone: remove non-digits, ensure country code
+def send_text(to: str, text: str, instance: str | None = None) -> bool:
+    """Send a WhatsApp text message via Evolution API.
+
+    Args:
+        to: Destination phone number.
+        text: Message content.
+        instance: Evolution API instance name. Defaults to EVOLUTION_INSTANCE_NAME.
+    """
     phone = "".join(c for c in to if c.isdigit())
     if not phone.startswith("55"):
         phone = "55" + phone
 
-    payload = {
-        "number": phone,
-        "text": text,
-    }
+    used_instance = instance or Config.EVOLUTION_INSTANCE_NAME
+    payload = {"number": phone, "text": text}
 
     try:
-        resp = requests.post(_base_url(), json=payload, headers=_headers(), timeout=15)
+        resp = requests.post(_send_url(used_instance), json=payload, headers=_headers(), timeout=15)
         resp.raise_for_status()
-        logger.info("Mensagem enviada para %s", phone)
+        logger.info("Mensagem enviada para %s via instância '%s'", phone, used_instance)
         return True
     except requests.RequestException as e:
         logger.error("Erro ao enviar mensagem para %s: %s", phone, e)
         return False
 
 
-def setup_webhook() -> bool:
+def setup_webhook(webhook_url: str | None = None) -> bool:
     """
     Configure the Evolution API webhook and verify WhatsApp connection.
     Called once on app startup.
+
+    Args:
+        webhook_url: Override URL (e.g. from ngrok). Falls back to WEBHOOK_URL env var.
     """
     base = Config.EVOLUTION_API_URL
     instance = Config.EVOLUTION_INSTANCE_NAME
-    webhook_url = Config.WEBHOOK_URL
+    webhook_url = webhook_url or Config.WEBHOOK_URL
 
     if not webhook_url:
         logger.warning("WEBHOOK_URL não definida — pulando configuração automática do webhook")
@@ -93,28 +99,28 @@ def setup_webhook() -> bool:
     return True
 
 
-def extract_message(payload: dict) -> tuple[str, str] | tuple[None, None]:
+def extract_message(payload: dict) -> tuple[str, str, str] | tuple[None, None, None]:
     """
-    Extract (phone, text) from an Evolution API webhook payload.
-    Returns (None, None) if the event is not a text message.
+    Extract (phone, text, instance) from an Evolution API webhook payload.
+    Returns (None, None, None) if the event is not a text message.
     """
     try:
         data = payload.get("data", {})
         key = data.get("key", {})
-        # Ignore messages sent by the bot itself
         if key.get("fromMe"):
-            return None, None
+            return None, None, None
 
         msg_type = data.get("messageType", "")
         if msg_type not in ("conversation", "extendedTextMessage"):
-            return None, None
+            return None, None, None
 
         message = data.get("message", {})
         text = message.get("conversation") or message.get("extendedTextMessage", {}).get("text", "")
         remote_jid = key.get("remoteJid", "")
-        # remoteJid format: 5585999999999@s.whatsapp.net
         phone = remote_jid.split("@")[0]
-        return phone, text.strip()
+        # Evolution API sends the source instance in the top-level payload
+        instance = payload.get("instance") or Config.EVOLUTION_INSTANCE_NAME
+        return phone, text.strip(), instance
     except Exception as e:
         logger.warning("Falha ao extrair mensagem do payload: %s", e)
-        return None, None
+        return None, None, None

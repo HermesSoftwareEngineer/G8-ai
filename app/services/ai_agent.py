@@ -1,8 +1,21 @@
 import json
 import logging
+import os
 from datetime import datetime, date, timedelta
-from openai import OpenAI
 from app.config import Config
+
+# LangSmith tracing — must be set before langchain imports
+if Config.LANGSMITH_API_KEY:
+    os.environ.setdefault("LANGCHAIN_API_KEY", Config.LANGSMITH_API_KEY)
+    os.environ.setdefault("LANGCHAIN_TRACING_V2", "true")
+    os.environ.setdefault("LANGCHAIN_PROJECT", Config.LANGCHAIN_PROJECT)
+
+from langchain_core.messages import HumanMessage, AIMessage
+from langchain_core.tools import tool
+from langchain_openai import ChatOpenAI
+from langgraph.prebuilt import create_react_agent
+from langgraph.checkpoint.postgres import PostgresSaver
+
 from app.models.database import get_db, db_insert, db_update
 from app.utils.md_reader import read_shop_info, read_prompt
 from app.utils.datetime_utils import FORTALEZA_TZ, fortaleza_to_utc, now_fortaleza
@@ -11,43 +24,55 @@ from app.services.notifications import send_confirmation, send_cancellation
 
 logger = logging.getLogger(__name__)
 
-_client = OpenAI(
-    api_key=Config.DEEPSEEK_API_KEY,
-    base_url=Config.DEEPSEEK_BASE_URL,
-)
+_llm: ChatOpenAI | None = None
+_checkpointer_ready = False
 
-MODEL = "deepseek-v4-flash"
-MAX_TOKENS = 1024
-MAX_CONTEXT_MESSAGES = 20
+RESET_COMMANDS = {"/reset", "/reiniciar", "reiniciar"}
 
 
 # ---------------------------------------------------------------------------
-# Session management
+# Singletons
 # ---------------------------------------------------------------------------
 
-def _get_or_create_session(phone: str) -> dict:
-    db = get_db()
-    result = db.table("conversation_sessions").select("*").eq("phone_whatsapp", phone).execute()
-    if result.data:
-        return result.data[0]
-    return db_insert("conversation_sessions", {
-        "phone_whatsapp": phone,
-        "context": [],
-        "state": "idle",
-    })
+def _get_llm() -> ChatOpenAI:
+    global _llm
+    if _llm is None:
+        _llm = ChatOpenAI(
+            api_key=Config.DEEPSEEK_API_KEY,
+            base_url=Config.DEEPSEEK_BASE_URL,
+            model="deepseek-v4-flash",
+            max_tokens=1024,
+        )
+    return _llm
 
 
-def _update_session(session_id: str, **fields) -> None:
-    db = get_db()
-    db.table("conversation_sessions").update({
-        "last_activity": "now()",
-        **fields,
-    }).eq("id", session_id).execute()
+def init_checkpointer() -> None:
+    """Create LangGraph checkpoint tables in Supabase. Call once at app startup."""
+    global _checkpointer_ready
+    if _checkpointer_ready or not Config.SUPABASE_DB_URL:
+        return
+    try:
+        with PostgresSaver.from_conn_string(Config.SUPABASE_DB_URL) as cp:
+            cp.setup()
+        _checkpointer_ready = True
+        logger.info("LangGraph PostgresSaver initialized")
+    except Exception as e:
+        logger.error("Falha ao inicializar checkpointer: %s", e)
 
 
-def _append_context(ctx: list, role: str, content: str) -> list:
-    ctx.append({"role": role, "content": content})
-    return ctx[-MAX_CONTEXT_MESSAGES:]
+# ---------------------------------------------------------------------------
+# System prompt
+# ---------------------------------------------------------------------------
+
+def _build_system_prompt(phone: str, customer: dict | None) -> str:
+    ai_cfg = _load_ai_config()
+    bot_name = ai_cfg.get("bot_name", "G8 AI")
+    customer_info = (
+        f"Nome: {customer['name']}, Telefone: {phone}"
+        if customer
+        else f"Número: {phone} (cliente novo)"
+    )
+    return read_prompt().format(bot_name=bot_name, customer_info=customer_info)
 
 
 # ---------------------------------------------------------------------------
@@ -90,239 +115,254 @@ def _get_customer(phone: str) -> dict | None:
 
 
 # ---------------------------------------------------------------------------
-# Main entrypoint
+# Session helpers
 # ---------------------------------------------------------------------------
 
-def process_message(phone: str, text: str) -> str:
-    session = _get_or_create_session(phone)
-    customer = _get_customer(phone)
+def _get_or_create_session(phone: str) -> dict:
+    db = get_db()
+    result = db.table("conversation_sessions").select("*").eq("phone_whatsapp", phone).execute()
+    if result.data:
+        return result.data[0]
+    return db_insert("conversation_sessions", {
+        "phone_whatsapp": phone,
+        "context": [],
+        "state": "idle",
+        "mode": "ai",
+    })
 
-    ai_cfg = _load_ai_config()
-    bot_name = ai_cfg.get("bot_name", "G8 AI")
-    customer_info = (
-        f"Nome: {customer['name']}, Telefone: {phone}"
-        if customer
-        else f"Número: {phone} (cliente novo)"
-    )
 
-    system_prompt = read_prompt().format(
-        bot_name=bot_name,
-        customer_info=customer_info,
-        state=session["state"],
-    )
-
-    # Build messages list: system + history + new user message
-    context: list = session.get("context") or []
-    messages = [{"role": "system", "content": system_prompt}] + list(context) + [{"role": "user", "content": text}]
-
-    tools = _define_tools()
-    response_text = _run_agent_loop(messages, tools, phone, customer)
-
-    # Persist updated context (without system message)
-    new_ctx = _append_context(list(context), "user", text)
-    new_ctx = _append_context(new_ctx, "assistant", response_text)
-    _update_session(session["id"], context=new_ctx)
-
-    return response_text
+def get_session_mode(phone: str) -> str:
+    """Returns 'ai' or 'human'. Defaults to 'ai' if no session exists."""
+    db = get_db()
+    result = db.table("conversation_sessions").select("mode").eq("phone_whatsapp", phone).execute()
+    if result.data:
+        return result.data[0].get("mode") or "ai"
+    return "ai"
 
 
 # ---------------------------------------------------------------------------
-# Tool definitions (OpenAI format)
+# Handoff
 # ---------------------------------------------------------------------------
 
-def _define_tools() -> list:
+def _do_handoff(phone: str, reason: str) -> None:
+    db = get_db()
+    result = db.table("conversation_sessions").select("id").eq("phone_whatsapp", phone).execute()
+    if result.data:
+        db.table("conversation_sessions").update({
+            "mode": "human",
+            "handoff_reason": reason,
+            "handoff_at": "now()",
+            "last_activity": "now()",
+        }).eq("phone_whatsapp", phone).execute()
+    else:
+        db_insert("conversation_sessions", {
+            "phone_whatsapp": phone,
+            "mode": "human",
+            "handoff_reason": reason,
+            "context": [],
+            "state": "idle",
+        })
+
+    try:
+        ai_cfg = _load_ai_config()
+        operator_phone = ai_cfg.get("operator_whatsapp")
+        if operator_phone:
+            from app.services.whatsapp import send_text
+            customer = _get_customer(phone)
+            customer_name = customer["name"] if customer else phone
+            send_text(
+                operator_phone,
+                f"⚠️ *Atendimento Humano Solicitado*\n"
+                f"Cliente: {customer_name}\n"
+                f"Número: {phone}\n"
+                f"Motivo: {reason}",
+            )
+    except Exception as e:
+        logger.error("Erro ao notificar operador: %s", e)
+
+
+# ---------------------------------------------------------------------------
+# Reset
+# ---------------------------------------------------------------------------
+
+def reset_session(phone: str) -> None:
+    """Clear LangGraph thread and reset session mode to 'ai'."""
+    if Config.SUPABASE_DB_URL:
+        try:
+            with PostgresSaver.from_conn_string(Config.SUPABASE_DB_URL) as checkpointer:
+                checkpointer.delete_thread(phone)
+        except Exception as e:
+            logger.error("Erro ao limpar checkpoints LangGraph: %s", e)
+
+    db = get_db()
+    result = db.table("conversation_sessions").select("id").eq("phone_whatsapp", phone).execute()
+    if result.data:
+        db.table("conversation_sessions").update({
+            "mode": "ai",
+            "assigned_to": None,
+            "handoff_reason": None,
+            "handoff_at": None,
+            "context": [],
+            "state": "idle",
+            "last_activity": "now()",
+        }).eq("phone_whatsapp", phone).execute()
+
+
+# ---------------------------------------------------------------------------
+# Tool factory (closure captures phone context)
+# ---------------------------------------------------------------------------
+
+def _build_tools(phone: str) -> list:
+    @tool
+    def get_shop_info() -> str:
+        """Retorna informações da barbearia: endereço, horário de funcionamento, políticas e redes sociais."""
+        return read_shop_info()
+
+    @tool
+    def get_services() -> str:
+        """Retorna a lista de serviços disponíveis com nome, duração e preço."""
+        return _load_services()
+
+    @tool
+    def get_barbers() -> str:
+        """Retorna a lista de barbeiros disponíveis com nome e bio."""
+        return _load_barbers()
+
+    @tool
+    def check_availability(date: str, service_name: str, barber_name: str = "") -> str:
+        """Verifica horários disponíveis para um barbeiro em uma data específica.
+
+        Args:
+            date: Data no formato YYYY-MM-DD
+            service_name: Nome do serviço desejado
+            barber_name: Nome do barbeiro (opcional — omitir para verificar todos)
+        """
+        return json.dumps(_tool_check_availability({
+            "date": date, "service_name": service_name, "barber_name": barber_name,
+        }), ensure_ascii=False)
+
+    @tool
+    def create_appointment(
+        barber_name: str,
+        service_name: str,
+        date: str,
+        time: str,
+        customer_name: str = "",
+    ) -> str:
+        """Cria um agendamento após confirmação explícita do cliente.
+
+        Args:
+            barber_name: Nome do barbeiro escolhido
+            service_name: Nome do serviço escolhido
+            date: Data no formato YYYY-MM-DD
+            time: Horário no formato HH:MM
+            customer_name: Nome do cliente (obrigatório se for novo)
+        """
+        customer = _get_customer(phone)
+        return json.dumps(_tool_create_appointment(
+            {"barber_name": barber_name, "service_name": service_name,
+             "date": date, "time": time, "customer_name": customer_name,
+             "customer_phone": phone},
+            phone, customer,
+        ), ensure_ascii=False)
+
+    @tool
+    def cancel_appointment(appointment_id: str = "") -> str:
+        """Cancela o próximo agendamento ativo do cliente após confirmação.
+
+        Args:
+            appointment_id: ID do agendamento (opcional — cancela o próximo se omitido)
+        """
+        return json.dumps(_tool_cancel_appointment(
+            {"customer_phone": phone, "appointment_id": appointment_id}
+        ), ensure_ascii=False)
+
+    @tool
+    def register_customer(name: str) -> str:
+        """Registra um novo cliente no sistema usando o número de WhatsApp atual.
+
+        Args:
+            name: Nome completo do cliente
+        """
+        return json.dumps(_tool_register_customer({"name": name, "phone": phone}), ensure_ascii=False)
+
+    @tool
+    def get_customer_appointments() -> str:
+        """Busca os agendamentos futuros do cliente atual."""
+        return json.dumps(_tool_get_customer_appointments({"customer_phone": phone}), ensure_ascii=False)
+
+    @tool
+    def transfer_to_human(reason: str) -> str:
+        """Transfere o atendimento para um operador humano.
+
+        Use quando: cliente pede explicitamente para falar com humano, situação muito
+        complexa ou sensível, reclamação grave, ou qualquer caso que exige julgamento humano.
+
+        Args:
+            reason: Motivo da transferência (será enviado ao operador)
+        """
+        _do_handoff(phone, reason)
+        return "Transferência realizada. O operador foi notificado e assumirá o atendimento em breve."
+
     return [
-        {
-            "type": "function",
-            "function": {
-                "name": "get_shop_info",
-                "description": "Retorna informações da barbearia: endereço, horário de funcionamento, políticas e redes sociais.",
-                "parameters": {"type": "object", "properties": {}, "required": []},
-            },
-        },
-        {
-            "type": "function",
-            "function": {
-                "name": "get_services",
-                "description": "Retorna a lista de serviços disponíveis com nome, duração e preço.",
-                "parameters": {"type": "object", "properties": {}, "required": []},
-            },
-        },
-        {
-            "type": "function",
-            "function": {
-                "name": "get_barbers",
-                "description": "Retorna a lista de barbeiros disponíveis com nome e bio.",
-                "parameters": {"type": "object", "properties": {}, "required": []},
-            },
-        },
-        {
-            "type": "function",
-            "function": {
-                "name": "check_availability",
-                "description": "Verifica horários disponíveis para um barbeiro em uma data específica.",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "barber_name": {"type": "string", "description": "Nome do barbeiro (opcional — omitir para todos)"},
-                        "date": {"type": "string", "description": "Data no formato YYYY-MM-DD"},
-                        "service_name": {"type": "string", "description": "Nome do serviço desejado"},
-                    },
-                    "required": ["date", "service_name"],
-                },
-            },
-        },
-        {
-            "type": "function",
-            "function": {
-                "name": "create_appointment",
-                "description": "Cria um agendamento após confirmação do cliente.",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "customer_phone": {"type": "string"},
-                        "customer_name": {"type": "string", "description": "Nome do cliente (obrigatório se for novo)"},
-                        "barber_name": {"type": "string"},
-                        "service_name": {"type": "string"},
-                        "date": {"type": "string", "description": "YYYY-MM-DD"},
-                        "time": {"type": "string", "description": "HH:MM"},
-                    },
-                    "required": ["customer_phone", "barber_name", "service_name", "date", "time"],
-                },
-            },
-        },
-        {
-            "type": "function",
-            "function": {
-                "name": "cancel_appointment",
-                "description": "Cancela o próximo agendamento ativo do cliente após confirmação.",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "customer_phone": {"type": "string"},
-                        "appointment_id": {"type": "string", "description": "ID do agendamento (se conhecido)"},
-                    },
-                    "required": ["customer_phone"],
-                },
-            },
-        },
-        {
-            "type": "function",
-            "function": {
-                "name": "register_customer",
-                "description": "Registra um novo cliente no sistema.",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "name": {"type": "string"},
-                        "phone": {"type": "string"},
-                    },
-                    "required": ["name", "phone"],
-                },
-            },
-        },
-        {
-            "type": "function",
-            "function": {
-                "name": "get_customer_appointments",
-                "description": "Busca os agendamentos futuros do cliente.",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "customer_phone": {"type": "string"},
-                    },
-                    "required": ["customer_phone"],
-                },
-            },
-        },
+        get_shop_info, get_services, get_barbers, check_availability,
+        create_appointment, cancel_appointment, register_customer,
+        get_customer_appointments, transfer_to_human,
     ]
 
 
 # ---------------------------------------------------------------------------
-# Agentic loop
+# Main entrypoint
 # ---------------------------------------------------------------------------
 
-def _run_agent_loop(messages: list, tools: list, phone: str, customer: dict | None) -> str:
-    for _ in range(10):
-        response = _client.chat.completions.create(
-            model=MODEL,
-            max_tokens=MAX_TOKENS,
-            messages=messages,
-            tools=tools,
-            tool_choice="auto",
-        )
+def process_message(phone: str, text: str) -> str:
+    customer = _get_customer(phone)
+    system_prompt = _build_system_prompt(phone, customer)
+    tools = _build_tools(phone)
 
-        choice = response.choices[0]
-        message = choice.message
+    if not Config.SUPABASE_DB_URL:
+        logger.warning("SUPABASE_DB_URL não configurado — usando fallback sem checkpointer")
+        return _process_without_checkpointer(system_prompt, tools, phone, text)
 
-        # No tool calls → final answer
-        if not message.tool_calls:
-            return (message.content or "").strip() or "Posso te ajudar com mais alguma coisa? 😊"
-
-        # Append assistant turn (with tool_calls)
-        messages.append({
-            "role": "assistant",
-            "content": message.content,
-            "tool_calls": [
-                {
-                    "id": tc.id,
-                    "type": "function",
-                    "function": {"name": tc.function.name, "arguments": tc.function.arguments},
-                }
-                for tc in message.tool_calls
-            ],
-        })
-
-        # Execute each tool and append results
-        for tc in message.tool_calls:
-            try:
-                args = json.loads(tc.function.arguments)
-            except json.JSONDecodeError:
-                args = {}
-
-            result = _execute_tool(tc.function.name, args, phone, customer)
-
-            # Refresh customer after registration
-            if tc.function.name == "register_customer" and result.get("success"):
-                customer = _get_customer(phone)
-
-            messages.append({
-                "role": "tool",
-                "tool_call_id": tc.id,
-                "content": json.dumps(result, ensure_ascii=False),
-            })
-
-    return "Desculpa, tive um problema por aqui. Pode repetir o que você queria? 🙏"
-
-
-# ---------------------------------------------------------------------------
-# Tool execution
-# ---------------------------------------------------------------------------
-
-def _execute_tool(name: str, inputs: dict, phone: str, customer: dict | None) -> dict:
-    logger.info("Tool: %s | inputs: %s", name, inputs)
     try:
-        if name == "get_shop_info":
-            return {"content": read_shop_info()}
-        elif name == "get_services":
-            return {"services": _load_services()}
-        elif name == "get_barbers":
-            return {"barbers": _load_barbers()}
-        elif name == "check_availability":
-            return _tool_check_availability(inputs)
-        elif name == "create_appointment":
-            return _tool_create_appointment(inputs, phone, customer)
-        elif name == "cancel_appointment":
-            return _tool_cancel_appointment(inputs)
-        elif name == "register_customer":
-            return _tool_register_customer(inputs)
-        elif name == "get_customer_appointments":
-            return _tool_get_customer_appointments(inputs)
-        return {"error": f"Ferramenta desconhecida: {name}"}
+        with PostgresSaver.from_conn_string(Config.SUPABASE_DB_URL) as checkpointer:
+            graph = create_react_agent(
+                _get_llm(),
+                tools,
+                checkpointer=checkpointer,
+                state_modifier=system_prompt,
+            )
+            config = {"configurable": {"thread_id": phone}}
+            result = graph.invoke(
+                {"messages": [HumanMessage(content=text)]},
+                config=config,
+            )
     except Exception as e:
-        logger.error("Erro na tool %s: %s", name, e, exc_info=True)
-        return {"error": str(e)}
+        logger.error("Erro no LangGraph: %s", e, exc_info=True)
+        return "Eita, deu um erro aqui. Pode repetir? 🙏"
 
+    messages = result.get("messages", [])
+    for msg in reversed(messages):
+        if isinstance(msg, AIMessage) and msg.content:
+            return str(msg.content).strip()
+    return "Posso te ajudar com mais alguma coisa? 😊"
+
+
+def _process_without_checkpointer(system_prompt: str, tools: list, phone: str, text: str) -> str:
+    """Fallback: runs without postgres checkpointer (no persistent history)."""
+    graph = create_react_agent(_get_llm(), tools, state_modifier=system_prompt)
+    config = {"configurable": {"thread_id": phone}}
+    result = graph.invoke({"messages": [HumanMessage(content=text)]}, config=config)
+    messages = result.get("messages", [])
+    for msg in reversed(messages):
+        if isinstance(msg, AIMessage) and msg.content:
+            return str(msg.content).strip()
+    return "Posso te ajudar com mais alguma coisa? 😊"
+
+
+# ---------------------------------------------------------------------------
+# Tool implementations (unchanged logic from original)
+# ---------------------------------------------------------------------------
 
 def _tool_check_availability(inputs: dict) -> dict:
     db = get_db()
@@ -339,7 +379,6 @@ def _tool_check_availability(inputs: dict) -> dict:
     if barber_name:
         query = query.ilike("name", f"%{barber_name}%")
     barbers = query.execute().data or []
-
     if not barbers:
         return {"error": "Nenhum barbeiro encontrado."}
 

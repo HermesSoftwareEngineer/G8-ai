@@ -387,17 +387,26 @@ Retorna as configurações da IA.
 **Response 200**
 ```json
 {
-  "bot_name":        { "value": "G8 AI", "description": "Nome do bot" },
-  "tone":            { "value": "casual", "description": "Tom de comunicação" },
-  "language":        { "value": "pt-BR", "description": "Idioma" },
-  "welcome_message": { "value": "Eae! ...", "description": "Mensagem de boas-vindas" }
+  "bot_name":           { "value": "G8 AI", "description": "Nome do bot" },
+  "tone":               { "value": "casual", "description": "Tom de comunicação" },
+  "language":           { "value": "pt-BR", "description": "Idioma" },
+  "welcome_message":    { "value": "Eae! ...", "description": "Mensagem de boas-vindas" },
+  "operator_whatsapp":  { "value": "5585999999999", "description": "Número do operador para notificações de handoff" }
 }
 ```
 
 ### PUT `/api/config/ai`
 ```json
-{ "bot_name": "G8 AI", "tone": "casual", "welcome_message": "Oi! Sou a G8 AI..." }
+{
+  "bot_name": "G8 AI",
+  "tone": "casual",
+  "welcome_message": "Oi! Sou a G8 AI...",
+  "operator_whatsapp": "5585999999999"
+}
 ```
+
+> **`operator_whatsapp`** — número no formato internacional sem `+` (ex: `5585999999999`).
+> Quando a IA aciona a tool `transfer_to_human`, este número recebe uma mensagem WhatsApp com o nome do cliente e o motivo do handoff.
 
 ---
 
@@ -443,17 +452,92 @@ Salva o `prompt.md`. A IA usa o novo prompt na próxima mensagem recebida, sem r
 { "content": "# Prompt da G8 AI\n\nVocê é a {bot_name}..." }
 ```
 
-> **Variáveis obrigatórias** — o prompt deve conter todas:
+> **Variáveis obrigatórias** — o prompt deve conter:
 >
 > | Variável | O que injeta |
 > |---|---|
 > | `{bot_name}` | Nome do bot (configurado em `/api/config/ai`) |
 > | `{customer_info}` | Nome e telefone do cliente (ou "cliente novo") |
-> | `{state}` | Estado atual da conversa |
 >
 > Se alguma variável estiver faltando, o endpoint retorna **400** com a lista das ausentes.
 >
-> > **Nota:** `shop_info`, serviços e barbeiros **não são mais injetados no prompt**. O agente os consulta sob demanda via tools `get_shop_info`, `get_services` e `get_barbers`.
+> > **Nota:** `shop_info`, serviços, barbeiros e estado da conversa **não são injetados no prompt**. O agente LangGraph gerencia o estado internamente e consulta dados sob demanda via tools.
+
+---
+
+## Sessões de Atendimento
+
+Gerencia qual contato está sendo atendido pela IA ou por um humano.
+
+### GET `/api/sessions`
+Lista todas as sessões ativas com modo e informações de handoff.
+
+**Response 200**
+```json
+[
+  {
+    "phone_whatsapp": "5585999990000",
+    "customer_name": "João Silva",
+    "mode": "ai",
+    "handoff_reason": null,
+    "handoff_at": null,
+    "last_activity": "2026-06-14T18:30:00Z"
+  },
+  {
+    "phone_whatsapp": "5585888880000",
+    "customer_name": "Maria Souza",
+    "mode": "human",
+    "handoff_reason": "Cliente quer falar sobre reclamação",
+    "handoff_at": "2026-06-14T17:55:00Z",
+    "last_activity": "2026-06-14T17:55:00Z"
+  }
+]
+```
+
+> `mode`: `"ai"` — IA respondendo automaticamente | `"human"` — IA silenciada, operador assume
+
+---
+
+### PUT `/api/sessions/:phone/mode`
+Alterna o modo de atendimento de um contato.
+
+**Body**
+```json
+{ "mode": "human" }
+```
+
+**Response 200**
+```json
+{ "status": "ok", "phone": "5585999990000", "mode": "human" }
+```
+
+> Ao passar `mode: "ai"`, os campos `handoff_reason` e `handoff_at` são limpos automaticamente.
+
+---
+
+### DELETE `/api/sessions/:phone`
+Reseta a conversa: apaga o histórico LangGraph do contato e volta o modo para `"ai"`.
+Equivalente ao comando `/reset` enviado pelo WhatsApp.
+
+**Response 200**
+```json
+{ "status": "reset", "phone": "5585999990000" }
+```
+
+---
+
+### POST `/api/sessions/:phone/message`
+Envia uma mensagem WhatsApp em nome do operador humano (modo `"human"`).
+
+**Body**
+```json
+{ "text": "Olá! Sou o Carlos, atendente da G8. Como posso ajudar?" }
+```
+
+**Response 200**
+```json
+{ "status": "sent", "phone": "5585999990000" }
+```
 
 ---
 

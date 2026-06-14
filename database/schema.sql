@@ -296,5 +296,23 @@ INSERT INTO ai_config (key, value, description) VALUES
     ('bot_name', 'G8 AI', 'Nome do bot de atendimento'),
     ('tone', 'casual', 'Tom de comunicação: casual | formal'),
     ('language', 'pt-BR', 'Idioma de atendimento'),
-    ('welcome_message', 'Eae! 👋 Sou a G8 AI, atendente virtual da Barbershop G8. Como posso te ajudar hoje?', 'Mensagem de boas-vindas')
+    ('welcome_message', 'Eae! 👋 Sou a G8 AI, atendente virtual da Barbershop G8. Como posso te ajudar hoje?', 'Mensagem de boas-vindas'),
+    ('operator_whatsapp', '', 'Número do operador para notificações de handoff (ex: 5585999999999)')
 ON CONFLICT (key) DO NOTHING;
+
+-- =============================================
+-- MIGRATION: Human Handoff + LangGraph support
+-- =============================================
+
+ALTER TABLE conversation_sessions
+    ADD COLUMN IF NOT EXISTS mode VARCHAR(10) DEFAULT 'ai',
+    ADD COLUMN IF NOT EXISTS assigned_to UUID REFERENCES users(id) ON DELETE SET NULL,
+    ADD COLUMN IF NOT EXISTS handoff_reason TEXT,
+    ADD COLUMN IF NOT EXISTS handoff_at TIMESTAMPTZ;
+
+-- Permissions for sessions management
+INSERT INTO permissions (role_id, action)
+SELECT r.id, a.action FROM roles r
+CROSS JOIN (VALUES ('manage_sessions')) AS a(action)
+WHERE r.name IN ('dev', 'owner', 'attendant')
+ON CONFLICT (role_id, action) DO NOTHING;

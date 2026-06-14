@@ -30,6 +30,7 @@ def create_app() -> Flask:
     from app.routes.schedules import bp as schedules_bp
     from app.routes.config import bp as config_bp
     from app.routes.dashboard import bp_dashboard
+    from app.routes.sessions import bp as sessions_bp
 
     app.register_blueprint(webhook_bp)
     app.register_blueprint(appointments_bp)
@@ -40,6 +41,7 @@ def create_app() -> Flask:
     app.register_blueprint(schedules_bp)
     app.register_blueprint(config_bp)
     app.register_blueprint(bp_dashboard)
+    app.register_blueprint(sessions_bp)
 
     # Health check
     @app.route("/health")
@@ -50,7 +52,17 @@ def create_app() -> Flask:
     if not app.testing:
         from app.services.reminder_job import start_scheduler
         from app.services.whatsapp import setup_webhook
+        from app.services.ai_agent import init_checkpointer
+
         start_scheduler()
-        setup_webhook()
+        init_checkpointer()
+
+        # In development, auto-start ngrok and use its URL as webhook
+        webhook_url = None
+        if Config.FLASK_ENV == "development":
+            from app.services.ngrok_service import start_dev_tunnel
+            webhook_url = start_dev_tunnel()
+
+        setup_webhook(webhook_url=webhook_url)
 
     return app

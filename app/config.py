@@ -18,7 +18,7 @@ class Config:
 
     SECRET_KEY = os.getenv("FLASK_SECRET_KEY", "dev-secret-change-in-prod")
     FLASK_ENV = os.getenv("FLASK_ENV", "development")
-    PORT = int(os.getenv("PORT", 5000))
+    PORT = int(os.getenv("PORT", 5001))
 
     TZ = os.getenv("TZ", "America/Fortaleza")
 
@@ -26,3 +26,14 @@ class Config:
     JWT_EXPIRY_HOURS = 24
 
     CORS_ORIGINS = ["http://localhost:3000", "http://127.0.0.1:3000"]
+
+    # ngrok (desenvolvimento)
+    NGROK_USE_FIXED_URL = os.getenv("NGROK_USE_FIXED_URL", "false").lower() == "true"
+    NGROK_AUTHTOKEN = os.getenv("NGROK_AUTHTOKEN")   # obrigatório quando NGROK_USE_FIXED_URL=true
+    NGROK_DOMAIN = os.getenv("NGROK_DOMAIN", "")     # obrigatório quando NGROK_USE_FIXED_URL=true
+
+    # LangGraph / LangSmith
+    SUPABASE_DB_URL = os.getenv("SUPABASE_DB_URL")          # postgresql://... direct connection
+    LANGSMITH_API_KEY = os.getenv("LANGSMITH_API_KEY")
+    LANGCHAIN_PROJECT = os.getenv("LANGCHAIN_PROJECT", "g8-ai")
+    LANGCHAIN_TRACING_V2 = os.getenv("LANGCHAIN_TRACING_V2", "false")
