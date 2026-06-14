@@ -1,10 +1,22 @@
 import logging
+import ssl
+import httpx
 from supabase import create_client, Client
 from app.config import Config
 
 logger = logging.getLogger(__name__)
 
 _client: Client | None = None
+
+# Monkey-patch httpx para ignorar SSL no DEV (Windows sem cert corporativo)
+_no_verify_transport = httpx.HTTPTransport(verify=False)
+_original_init = httpx.Client.__init__
+
+def _patched_init(self, *args, **kwargs):
+    kwargs.setdefault("transport", _no_verify_transport)
+    _original_init(self, *args, **kwargs)
+
+httpx.Client.__init__ = _patched_init
 
 
 def get_db() -> Client:
