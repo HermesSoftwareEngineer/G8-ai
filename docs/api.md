@@ -448,13 +448,12 @@ Salva o `prompt.md`. A IA usa o novo prompt na próxima mensagem recebida, sem r
 > | Variável | O que injeta |
 > |---|---|
 > | `{bot_name}` | Nome do bot (configurado em `/api/config/ai`) |
-> | `{shop_info}` | Conteúdo do `shop_info.md` |
-> | `{services}` | Lista de serviços ativos do banco |
-> | `{barbers}` | Lista de barbeiros ativos do banco |
 > | `{customer_info}` | Nome e telefone do cliente (ou "cliente novo") |
 > | `{state}` | Estado atual da conversa |
 >
 > Se alguma variável estiver faltando, o endpoint retorna **400** com a lista das ausentes.
+>
+> > **Nota:** `shop_info`, serviços e barbeiros **não são mais injetados no prompt**. O agente os consulta sob demanda via tools `get_shop_info`, `get_services` e `get_barbers`.
 
 ---
 

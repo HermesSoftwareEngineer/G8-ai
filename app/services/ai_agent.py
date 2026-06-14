@@ -107,9 +107,6 @@ def process_message(phone: str, text: str) -> str:
 
     system_prompt = read_prompt().format(
         bot_name=bot_name,
-        shop_info=read_shop_info(),
-        services=_load_services(),
-        barbers=_load_barbers(),
         customer_info=customer_info,
         state=session["state"],
     )
@@ -135,6 +132,30 @@ def process_message(phone: str, text: str) -> str:
 
 def _define_tools() -> list:
     return [
+        {
+            "type": "function",
+            "function": {
+                "name": "get_shop_info",
+                "description": "Retorna informações da barbearia: endereço, horário de funcionamento, políticas e redes sociais.",
+                "parameters": {"type": "object", "properties": {}, "required": []},
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "get_services",
+                "description": "Retorna a lista de serviços disponíveis com nome, duração e preço.",
+                "parameters": {"type": "object", "properties": {}, "required": []},
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "get_barbers",
+                "description": "Retorna a lista de barbeiros disponíveis com nome e bio.",
+                "parameters": {"type": "object", "properties": {}, "required": []},
+            },
+        },
         {
             "type": "function",
             "function": {
@@ -281,7 +302,13 @@ def _run_agent_loop(messages: list, tools: list, phone: str, customer: dict | No
 def _execute_tool(name: str, inputs: dict, phone: str, customer: dict | None) -> dict:
     logger.info("Tool: %s | inputs: %s", name, inputs)
     try:
-        if name == "check_availability":
+        if name == "get_shop_info":
+            return {"content": read_shop_info()}
+        elif name == "get_services":
+            return {"services": _load_services()}
+        elif name == "get_barbers":
+            return {"barbers": _load_barbers()}
+        elif name == "check_availability":
             return _tool_check_availability(inputs)
         elif name == "create_appointment":
             return _tool_create_appointment(inputs, phone, customer)
