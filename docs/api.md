@@ -428,6 +428,36 @@ Salva o conteúdo do `shop_info.md` (a IA usa na próxima mensagem, sem restart)
 
 ---
 
+### GET `/api/config/ai/prompt`
+Retorna o conteúdo do arquivo `prompt.md` — o system prompt da IA editável pelo painel.
+
+**Response 200**
+```json
+{ "content": "# Prompt da G8 AI\n\nVocê é a {bot_name}..." }
+```
+
+### PUT `/api/config/ai/prompt`
+Salva o `prompt.md`. A IA usa o novo prompt na próxima mensagem recebida, sem restart.
+
+```json
+{ "content": "# Prompt da G8 AI\n\nVocê é a {bot_name}..." }
+```
+
+> **Variáveis obrigatórias** — o prompt deve conter todas:
+>
+> | Variável | O que injeta |
+> |---|---|
+> | `{bot_name}` | Nome do bot (configurado em `/api/config/ai`) |
+> | `{shop_info}` | Conteúdo do `shop_info.md` |
+> | `{services}` | Lista de serviços ativos do banco |
+> | `{barbers}` | Lista de barbeiros ativos do banco |
+> | `{customer_info}` | Nome e telefone do cliente (ou "cliente novo") |
+> | `{state}` | Estado atual da conversa |
+>
+> Se alguma variável estiver faltando, o endpoint retorna **400** com a lista das ausentes.
+
+---
+
 ## Health Check
 
 ### GET `/health`

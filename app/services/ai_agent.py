@@ -4,7 +4,7 @@ from datetime import datetime, date, timedelta
 from openai import OpenAI
 from app.config import Config
 from app.models.database import get_db, db_insert, db_update
-from app.utils.md_reader import read_shop_info
+from app.utils.md_reader import read_shop_info, read_prompt
 from app.utils.datetime_utils import FORTALEZA_TZ, fortaleza_to_utc, now_fortaleza
 from app.services.scheduler import get_available_slots, is_slot_available
 from app.services.notifications import send_confirmation, send_cancellation
@@ -105,25 +105,13 @@ def process_message(phone: str, text: str) -> str:
         else f"Número: {phone} (cliente novo)"
     )
 
-    system_prompt = (
-        f"Você é a {bot_name}, atendente virtual da Barbershop G8, em Fortaleza, Ceará.\n"
-        f"Seu tom é casual, descontraído e simpático. Você fala português brasileiro natural.\n"
-        f"Você pode tirar dúvidas sobre a barbearia e realizar agendamentos.\n\n"
-        f"Informações da barbearia:\n{read_shop_info()}\n\n"
-        f"Serviços disponíveis:\n{_load_services()}\n\n"
-        f"Barbeiros disponíveis:\n{_load_barbers()}\n\n"
-        f"Cliente atual:\n{customer_info}\n\n"
-        f"Estado atual da conversa: {session['state']}\n\n"
-        f"Regras:\n"
-        f"- Nunca invente informações. Se não souber, diga que vai verificar.\n"
-        f"- Para agendamentos, colete: serviço desejado, barbeiro (ou qualquer disponível), data e horário.\n"
-        f"- Confirme sempre antes de finalizar o agendamento.\n"
-        f"- Ao confirmar agendamento, informe todos os detalhes claramente.\n"
-        f"- Se o cliente quiser cancelar, confirme antes de cancelar.\n"
-        f"- Mantenha respostas curtas e diretas para WhatsApp.\n"
-        f"- Quando o cliente for novo e quiser agendar, pergunte o nome dele primeiro.\n"
-        f"- Datas e horários devem ser no fuso horário de Fortaleza (UTC-3).\n"
-        f"- Use as ferramentas disponíveis para executar ações. Nunca simule ações sem chamar as ferramentas.\n"
+    system_prompt = read_prompt().format(
+        bot_name=bot_name,
+        shop_info=read_shop_info(),
+        services=_load_services(),
+        barbers=_load_barbers(),
+        customer_info=customer_info,
+        state=session["state"],
     )
 
     # Build messages list: system + history + new user message

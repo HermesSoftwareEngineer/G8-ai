@@ -1,7 +1,7 @@
 from flask import Blueprint, request, jsonify
 from app.models.database import get_db, db_upsert
 from app.utils.auth import require_auth, require_permission
-from app.utils.md_reader import read_shop_info, write_shop_info
+from app.utils.md_reader import read_shop_info, write_shop_info, read_prompt, write_prompt
 
 bp = Blueprint("config", __name__, url_prefix="/api/config")
 
@@ -72,3 +72,34 @@ def update_shop_md():
         return jsonify({"error": "Campo 'content' é obrigatório"}), 400
     write_shop_info(content)
     return jsonify({"message": "shop_info.md atualizado com sucesso"})
+
+
+# ---------------------------------------------------------------------------
+# AI Prompt (Markdown file)
+# ---------------------------------------------------------------------------
+
+@bp.route("/ai/prompt", methods=["GET"])
+@require_auth
+def get_ai_prompt():
+    return jsonify({"content": read_prompt()})
+
+
+@bp.route("/ai/prompt", methods=["PUT"])
+@require_permission("edit_ai_config")
+def update_ai_prompt():
+    body = request.get_json() or {}
+    content = body.get("content", "")
+    if not content:
+        return jsonify({"error": "Campo 'content' é obrigatório"}), 400
+
+    # Garante que as variáveis obrigatórias ainda estão no template
+    required = ["{bot_name}", "{shop_info}", "{services}", "{barbers}", "{customer_info}", "{state}"]
+    missing = [v for v in required if v not in content]
+    if missing:
+        return jsonify({
+            "error": "O prompt deve conter todas as variáveis obrigatórias",
+            "missing": missing,
+        }), 400
+
+    write_prompt(content)
+    return jsonify({"message": "prompt.md atualizado com sucesso"})
