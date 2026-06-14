@@ -9,8 +9,6 @@ requests==2.32.3
 python-dotenv==1.0.1
 pytz==2024.1
 gunicorn==22.0.0
-# ngrok tunnel automático (desenvolvimento)
-pyngrok>=7.0.0
 # LangGraph + observability
 langgraph>=0.3.0
 langchain-openai>=0.2.0

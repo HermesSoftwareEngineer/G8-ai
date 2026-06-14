@@ -27,11 +27,6 @@ class Config:
 
     CORS_ORIGINS = ["http://localhost:3000", "http://127.0.0.1:3000"]
 
-    # ngrok (desenvolvimento)
-    NGROK_USE_FIXED_URL = os.getenv("NGROK_USE_FIXED_URL", "false").lower() == "true"
-    NGROK_AUTHTOKEN = os.getenv("NGROK_AUTHTOKEN")   # obrigatório quando NGROK_USE_FIXED_URL=true
-    NGROK_DOMAIN = os.getenv("NGROK_DOMAIN", "")     # obrigatório quando NGROK_USE_FIXED_URL=true
-
     # LangGraph / LangSmith
     SUPABASE_DB_URL = os.getenv("SUPABASE_DB_URL")          # postgresql://... direct connection
     LANGSMITH_API_KEY = os.getenv("LANGSMITH_API_KEY")

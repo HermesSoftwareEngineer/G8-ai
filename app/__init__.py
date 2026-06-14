@@ -56,13 +56,6 @@ def create_app() -> Flask:
 
         start_scheduler()
         init_checkpointer()
-
-        # In development, auto-start ngrok and use its URL as webhook
-        webhook_url = None
-        if Config.FLASK_ENV == "development":
-            from app.services.ngrok_service import start_dev_tunnel
-            webhook_url = start_dev_tunnel()
-
-        setup_webhook(webhook_url=webhook_url)
+        setup_webhook()
 
     return app

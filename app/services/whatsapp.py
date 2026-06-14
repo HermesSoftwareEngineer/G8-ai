@@ -41,17 +41,11 @@ def send_text(to: str, text: str, instance: str | None = None) -> bool:
         return False
 
 
-def setup_webhook(webhook_url: str | None = None) -> bool:
-    """
-    Configure the Evolution API webhook and verify WhatsApp connection.
-    Called once on app startup.
-
-    Args:
-        webhook_url: Override URL (e.g. from ngrok). Falls back to WEBHOOK_URL env var.
-    """
+def setup_webhook() -> bool:
+    """Configure the Evolution API webhook and verify WhatsApp connection."""
     base = Config.EVOLUTION_API_URL
     instance = Config.EVOLUTION_INSTANCE_NAME
-    webhook_url = webhook_url or Config.WEBHOOK_URL
+    webhook_url = Config.WEBHOOK_URL
 
     if not webhook_url:
         logger.warning("WEBHOOK_URL não definida — pulando configuração automática do webhook")
