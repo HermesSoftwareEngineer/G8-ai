@@ -30,6 +30,15 @@ _checkpointer_ready = False
 RESET_COMMANDS = {"/reset", "/reiniciar", "reiniciar"}
 
 
+def _db_url() -> str:
+    """Append connect_timeout so a bad/unreachable DB fails fast instead of hanging."""
+    url = Config.SUPABASE_DB_URL or ""
+    if url and "connect_timeout" not in url:
+        sep = "&" if "?" in url else "?"
+        url = f"{url}{sep}connect_timeout=10"
+    return url
+
+
 # ---------------------------------------------------------------------------
 # Singletons
 # ---------------------------------------------------------------------------
@@ -52,7 +61,7 @@ def init_checkpointer() -> None:
     if _checkpointer_ready or not Config.SUPABASE_DB_URL:
         return
     try:
-        with PostgresSaver.from_conn_string(Config.SUPABASE_DB_URL) as cp:
+        with PostgresSaver.from_conn_string(_db_url()) as cp:
             cp.setup()
         _checkpointer_ready = True
         logger.info("LangGraph PostgresSaver initialized")
@@ -189,7 +198,7 @@ def reset_session(phone: str) -> None:
     """Clear LangGraph thread and reset session mode to 'ai'."""
     if Config.SUPABASE_DB_URL:
         try:
-            with PostgresSaver.from_conn_string(Config.SUPABASE_DB_URL) as checkpointer:
+            with PostgresSaver.from_conn_string(_db_url()) as checkpointer:
                 checkpointer.delete_thread(phone)
         except Exception as e:
             logger.error("Erro ao limpar checkpoints LangGraph: %s", e)
@@ -325,12 +334,12 @@ def process_message(phone: str, text: str) -> str:
         return _process_without_checkpointer(system_prompt, tools, phone, text)
 
     try:
-        with PostgresSaver.from_conn_string(Config.SUPABASE_DB_URL) as checkpointer:
+        with PostgresSaver.from_conn_string(_db_url()) as checkpointer:
             graph = create_react_agent(
                 _get_llm(),
                 tools,
                 checkpointer=checkpointer,
-                state_modifier=system_prompt,
+                prompt=system_prompt,
             )
             config = {"configurable": {"thread_id": phone}}
             result = graph.invoke(

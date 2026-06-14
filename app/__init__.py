@@ -55,7 +55,10 @@ def create_app() -> Flask:
         from app.services.ai_agent import init_checkpointer
 
         start_scheduler()
-        init_checkpointer()
         setup_webhook()
+
+        # Init checkpointer in background — avoids blocking Flask startup on DB timeout
+        import threading
+        threading.Thread(target=init_checkpointer, daemon=True).start()
 
     return app

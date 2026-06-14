@@ -22,10 +22,14 @@ class Config:
 
     TZ = os.getenv("TZ", "America/Fortaleza")
 
+    NGROK_AUTHTOKEN = os.getenv("NGROK_AUTHTOKEN", "")
+    NGROK_DOMAIN = os.getenv("NGROK_DOMAIN", "")
+    NGROK_USE_FIXED_URL = os.getenv("NGROK_USE_FIXED_URL", "false").lower() == "true"
+
     JWT_ALGORITHM = "HS256"
     JWT_EXPIRY_HOURS = 24
 
-    CORS_ORIGINS = ["http://localhost:3000", "http://127.0.0.1:3000"]
+    CORS_ORIGINS = os.getenv("CORS_ORIGINS", "http://localhost:3000,http://127.0.0.1:3000").split(",")
 
     # LangGraph / LangSmith
     SUPABASE_DB_URL = os.getenv("SUPABASE_DB_URL")          # postgresql://... direct connection
