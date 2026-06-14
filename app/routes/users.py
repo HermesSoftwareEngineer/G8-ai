@@ -29,7 +29,12 @@ def login():
 
     token = create_token(user["id"], user["roles"]["name"] if user.get("roles") else "")
     user.pop("password_hash", None)
-    return jsonify({"token": token, "user": user})
+    return jsonify({
+        "token": token,
+        "access_token": token,
+        "token_type": "bearer",
+        "user": user,
+    })
 
 
 @bp.route("/api/auth/refresh", methods=["POST"])
@@ -42,7 +47,12 @@ def refresh():
     role_name = role_res.data[0]["name"] if role_res.data else ""
     token = create_token(user["id"], role_name)
     user.pop("password_hash", None)
-    return jsonify({"token": token, "user": user})
+    return jsonify({
+        "token": token,
+        "access_token": token,
+        "token_type": "bearer",
+        "user": user,
+    })
 
 
 @bp.route("/api/auth/logout", methods=["POST"])
