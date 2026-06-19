@@ -14,7 +14,6 @@ from langchain_core.messages import HumanMessage, AIMessage
 from langchain_core.tools import tool
 from langchain_openai import ChatOpenAI
 from langgraph.prebuilt import create_react_agent
-from langgraph.checkpoint.postgres import PostgresSaver
 
 from app.models.database import get_db, db_insert, db_update
 from app.utils.md_reader import read_shop_info, read_prompt
@@ -25,11 +24,11 @@ from app.services.notifications import send_confirmation, send_cancellation
 logger = logging.getLogger(__name__)
 
 _llm: ChatOpenAI | None = None
-_checkpointer_ready = False
+
+# Active messages kept in context per invocation; older messages become the rolling summary.
+CONTEXT_WINDOW = 10
 
 RESET_COMMANDS = {"/reset", "/reiniciar", "reiniciar"}
-
-SUMMARIZE_THRESHOLD = 30
 
 
 def _db_url() -> str:
@@ -58,17 +57,8 @@ def _get_llm() -> ChatOpenAI:
 
 
 def init_checkpointer() -> None:
-    """Create LangGraph checkpoint tables in Supabase. Call once at app startup."""
-    global _checkpointer_ready
-    if _checkpointer_ready or not Config.SUPABASE_DB_URL:
-        return
-    try:
-        with PostgresSaver.from_conn_string(_db_url()) as cp:
-            cp.setup()
-        _checkpointer_ready = True
-        logger.info("LangGraph PostgresSaver initialized")
-    except Exception as e:
-        logger.error("Falha ao inicializar checkpointer: %s", e)
+    """No-op — conversation history is now stored in the conversation_messages table."""
+    pass
 
 
 # ---------------------------------------------------------------------------
@@ -147,39 +137,61 @@ def get_session_mode(phone: str) -> str:
 
 
 # ---------------------------------------------------------------------------
-# Summarization
+# Message history helpers
 # ---------------------------------------------------------------------------
 
-def _get_thread_messages(phone: str) -> str:
-    """Retrieve conversation history from LangGraph thread as formatted text."""
-    if not Config.SUPABASE_DB_URL:
-        return ""
-    try:
-        with PostgresSaver.from_conn_string(_db_url()) as checkpointer:
-            config = {"configurable": {"thread_id": phone}}
-            ckpt_tuple = checkpointer.get_tuple(config)
-            if not ckpt_tuple or not ckpt_tuple.checkpoint:
-                return ""
-            channel_values = ckpt_tuple.checkpoint.get("channel_values", {})
-            messages = channel_values.get("messages", [])
-            if not messages:
-                return ""
+def _save_message(phone: str, role: str, content: str) -> None:
+    db = get_db()
+    db.table("conversation_messages").insert({
+        "phone_whatsapp": phone,
+        "role": role,
+        "content": content,
+    }).execute()
 
-            lines = []
-            for msg in messages:
-                try:
-                    role = "Cliente" if isinstance(msg, HumanMessage) else "Atendente"
-                    content = str(msg.content).strip()
-                except Exception:
-                    content = str(msg).strip()
-                    role = "Msg"
-                if content:
-                    lines.append(f"{role}: {content}")
-            return "\n".join(lines)
-    except Exception as e:
-        logger.error("Erro ao ler thread LangGraph: %s", e)
-        return ""
 
+def _count_messages(phone: str) -> int:
+    db = get_db()
+    result = (
+        db.table("conversation_messages")
+        .select("id", count="exact")
+        .eq("phone_whatsapp", phone)
+        .execute()
+    )
+    return result.count or 0
+
+
+def _build_message_history(phone: str) -> list:
+    """Returns summary context (if any) followed by the last CONTEXT_WINDOW messages."""
+    db = get_db()
+
+    sess = db.table("conversation_sessions").select("summary").eq("phone_whatsapp", phone).execute()
+    summary = (sess.data[0].get("summary") or "") if sess.data else ""
+
+    result = (
+        db.table("conversation_messages")
+        .select("role, content")
+        .eq("phone_whatsapp", phone)
+        .order("created_at", desc=True)
+        .limit(CONTEXT_WINDOW)
+        .execute()
+    )
+    recent = list(reversed(result.data or []))
+
+    messages: list = []
+    if summary:
+        messages.append(HumanMessage(content=f"[Resumo do histórico desta conversa]\n{summary}"))
+        messages.append(AIMessage(content="Contexto anterior carregado. Estou ciente do histórico desta conversa."))
+
+    for m in recent:
+        cls = HumanMessage if m["role"] == "human" else AIMessage
+        messages.append(cls(content=m["content"]))
+
+    return messages
+
+
+# ---------------------------------------------------------------------------
+# Summarization
+# ---------------------------------------------------------------------------
 
 def _generate_summary(messages_text: str) -> str:
     """Use LLM to summarize a conversation, extracting key facts."""
@@ -205,32 +217,59 @@ def _generate_summary(messages_text: str) -> str:
         return ""
 
 
-def _check_and_summarize(phone: str) -> None:
-    """Increment message count and trigger summarization when threshold reached."""
+def _update_summary(phone: str) -> None:
+    """Incrementally update the summary to cover all messages beyond the active window."""
     db = get_db()
-    result = db.table("conversation_sessions").select("id, message_count").eq("phone_whatsapp", phone).execute()
-    if not result.data:
+    total = _count_messages(phone)
+    if total <= CONTEXT_WINDOW:
         return
 
-    session = result.data[0]
-    count = (session.get("message_count") or 0) + 1
+    sess = (
+        db.table("conversation_sessions")
+        .select("summary, summarized_count")
+        .eq("phone_whatsapp", phone)
+        .execute()
+    )
+    if not sess.data:
+        return
 
-    if count >= SUMMARIZE_THRESHOLD:
-        messages_text = _get_thread_messages(phone)
-        if messages_text:
-            summary = _generate_summary(messages_text)
-            db.table("conversation_sessions").update({
-                "summary": summary,
-                "message_count": 0,
-                "last_activity": "now()",
-            }).eq("phone_whatsapp", phone).execute()
-            clear_thread(phone)
-            logger.info("Conversa resumida e thread limpa para %s", phone)
-    else:
-        db.table("conversation_sessions").update({
-            "message_count": count,
-            "last_activity": "now()",
-        }).eq("phone_whatsapp", phone).execute()
+    session = sess.data[0]
+    summarized_count = session.get("summarized_count") or 0
+    old_summary = session.get("summary") or ""
+
+    # How many messages now sit outside the active window?
+    new_end = total - CONTEXT_WINDOW  # exclusive upper index of messages to summarize
+    if new_end <= summarized_count:
+        return  # Nothing new fell out of the window
+
+    new_msgs = (
+        db.table("conversation_messages")
+        .select("role, content")
+        .eq("phone_whatsapp", phone)
+        .order("created_at", desc=False)
+        .range(summarized_count, new_end - 1)
+        .execute()
+        .data or []
+    )
+    if not new_msgs:
+        return
+
+    new_text = "\n".join(
+        f"{'Cliente' if m['role'] == 'human' else 'Atendente'}: {m['content']}"
+        for m in new_msgs
+    )
+
+    full_text = (
+        f"[Resumo anterior]\n{old_summary}\n\n[Continuação da conversa]\n{new_text}"
+        if old_summary else new_text
+    )
+    new_summary = _generate_summary(full_text)
+
+    db.table("conversation_sessions").update({
+        "summary": new_summary,
+        "summarized_count": new_end,
+        "last_activity": "now()",
+    }).eq("phone_whatsapp", phone).execute()
 
 
 # ---------------------------------------------------------------------------
@@ -279,30 +318,19 @@ def _do_handoff(phone: str, reason: str) -> None:
 # ---------------------------------------------------------------------------
 
 def clear_thread(phone: str) -> None:
-    """Delete LangGraph checkpoints for a phone number (new thread on next message)."""
-    if not Config.SUPABASE_DB_URL:
-        return
-    try:
-        with PostgresSaver.from_conn_string(_db_url()) as checkpointer:
-            checkpointer.delete_thread(phone)
-    except Exception as e:
-        logger.error("Erro ao limpar thread LangGraph: %s", e)
-
+    """Clear conversation history for a phone number."""
     db = get_db()
+    db.table("conversation_messages").delete().eq("phone_whatsapp", phone).execute()
     db.table("conversation_sessions").update({
+        "summary": None,
+        "summarized_count": 0,
         "message_count": 0,
     }).eq("phone_whatsapp", phone).execute()
 
 
 def reset_session(phone: str) -> None:
-    """Clear LangGraph thread and reset session mode to 'ai'."""
-    if Config.SUPABASE_DB_URL:
-        try:
-            with PostgresSaver.from_conn_string(_db_url()) as checkpointer:
-                checkpointer.delete_thread(phone)
-        except Exception as e:
-            logger.error("Erro ao limpar checkpoints LangGraph: %s", e)
-
+    """Clear conversation history and reset session to AI mode."""
+    clear_thread(phone)
     db = get_db()
     result = db.table("conversation_sessions").select("id").eq("phone_whatsapp", phone).execute()
     if result.data:
@@ -316,6 +344,7 @@ def reset_session(phone: str) -> None:
             "last_activity": "now()",
             "message_count": 0,
             "summary": None,
+            "summarized_count": 0,
         }).eq("phone_whatsapp", phone).execute()
 
 
@@ -451,11 +480,43 @@ def _build_tools(phone: str) -> list:
         send_text(operator_phone, full_msg)
         return "Mensagem enviada ao supervisor com sucesso."
 
+    @tool
+    def read_conversation_history(page: int = 1) -> str:
+        """Lê mensagens anteriores da conversa, de 10 em 10.
+
+        As últimas 10 mensagens já estão no seu contexto atual.
+        Use page=1 para as 10 mensagens imediatamente anteriores,
+        page=2 para as 10 anteriores a essas, e assim por diante.
+
+        Args:
+            page: Página do histórico (1 = mensagens 11-20, 2 = mensagens 21-30, etc.)
+        """
+        if page < 1:
+            return "Página inválida. Use page >= 1."
+        db = get_db()
+        offset = CONTEXT_WINDOW + (page - 1) * CONTEXT_WINDOW
+        result = (
+            db.table("conversation_messages")
+            .select("role, content")
+            .eq("phone_whatsapp", phone)
+            .order("created_at", desc=True)
+            .range(offset, offset + CONTEXT_WINDOW - 1)
+            .execute()
+        )
+        msgs = list(reversed(result.data or []))
+        if not msgs:
+            return "Não há mensagens anteriores nesta página."
+        lines = [f"[Histórico — página {page}]"]
+        for m in msgs:
+            role = "Cliente" if m["role"] == "human" else "Atendente"
+            lines.append(f"{role}: {m['content']}")
+        return "\n".join(lines)
+
     return [
         get_shop_info, get_services, get_barbers, check_availability,
         create_appointment, cancel_appointment, register_customer,
         get_customer_appointments, transfer_to_human, get_conversation_summary,
-        contact_supervisor,
+        contact_supervisor, read_conversation_history,
     ]
 
 
@@ -464,53 +525,44 @@ def _build_tools(phone: str) -> list:
 # ---------------------------------------------------------------------------
 
 def process_message(phone: str, text: str) -> str:
+    # Persist the incoming human message before building context
+    _save_message(phone, "human", text)
+
     system_prompt = _build_system_prompt()
     tools = _build_tools(phone)
 
-    if not Config.SUPABASE_DB_URL:
-        logger.warning("SUPABASE_DB_URL não configurado — usando fallback sem checkpointer")
-        return _process_without_checkpointer(system_prompt, tools, phone, text)
+    # Context: rolling summary (if any) + last CONTEXT_WINDOW messages (includes current)
+    history = _build_message_history(phone)
+
+    graph = create_react_agent(_get_llm(), tools, prompt=system_prompt)
 
     try:
-        with PostgresSaver.from_conn_string(_db_url()) as checkpointer:
-            graph = create_react_agent(
-                _get_llm(),
-                tools,
-                checkpointer=checkpointer,
-                prompt=system_prompt,
-            )
-            config = {"configurable": {"thread_id": phone}}
-            result = graph.invoke(
-                {"messages": [HumanMessage(content=text)]},
-                config=config,
-            )
+        result = graph.invoke({"messages": history})
     except Exception as e:
         logger.error("Erro no LangGraph: %s", e, exc_info=True)
         return "Eita, deu um erro aqui. Pode repetir? 🙏"
 
-    _check_and_summarize(phone)
-
     messages = result.get("messages", [])
+    response = "Posso te ajudar com mais alguma coisa? 😊"
     for msg in reversed(messages):
         if isinstance(msg, AIMessage) and msg.content:
-            return str(msg.content).strip()
-    return "Posso te ajudar com mais alguma coisa? 😊"
+            response = str(msg.content).strip()
+            break
 
+    # Persist AI response
+    _save_message(phone, "ai", response)
 
-def _process_without_checkpointer(system_prompt: str, tools: list, phone: str, text: str) -> str:
-    """Fallback: runs without postgres checkpointer (no persistent history)."""
-    graph = create_react_agent(_get_llm(), tools, state_modifier=system_prompt)
-    config = {"configurable": {"thread_id": phone}}
-    result = graph.invoke({"messages": [HumanMessage(content=text)]}, config=config)
-    messages = result.get("messages", [])
-    for msg in reversed(messages):
-        if isinstance(msg, AIMessage) and msg.content:
-            return str(msg.content).strip()
-    return "Posso te ajudar com mais alguma coisa? 😊"
+    # Update rolling summary if messages fell outside the active window
+    try:
+        _update_summary(phone)
+    except Exception as e:
+        logger.error("Erro ao atualizar resumo: %s", e)
+
+    return response
 
 
 # ---------------------------------------------------------------------------
-# Tool implementations (unchanged logic from original)
+# Tool implementations
 # ---------------------------------------------------------------------------
 
 def _tool_check_availability(inputs: dict) -> dict:
