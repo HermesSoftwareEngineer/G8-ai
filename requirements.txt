@@ -1,7 +1,7 @@
 flask==3.0.3
 flask-cors==4.0.1
 supabase==2.31.0
-openai==1.82.1
+openai>=1.86.0
 python-jose[cryptography]==3.3.0
 # passlib removido: usa werkzeug.security (já incluso no Flask)
 apscheduler==3.10.4
